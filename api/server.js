@@ -7,8 +7,8 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const iconv = require('iconv-lite');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const genAI = process.env.GOOGLE_API_KEY
-  ? new GoogleGenerativeAI(process.env.GOOGLE_API_KEY)
+const genAI = 'AIzaSyCOTFRIHQLZTkspuzy1wAiiVOJcy_-ON2M'
+  ? new GoogleGenerativeAI('AIzaSyCOTFRIHQLZTkspuzy1wAiiVOJcy_-ON2M')
   : null;
 
 
@@ -92,7 +92,7 @@ function bodyLooksExpired(data) {
 }
 
 async function sankhyaLogin(usuario, senha) {
-  const url = '/mge/service.sbr?serviceName=MobileLoginSP.login&outputType=json';
+  const url = 'http://sankhya2.nxboats.com.br:8180/mge/service.sbr?serviceName=MobileLoginSP.login&outputType=json';
   const payload = {
     serviceName: "MobileLoginSP.login",
     requestBody: {
@@ -110,7 +110,7 @@ async function sankhyaLogin(usuario, senha) {
 }
 
 async function sankhyaQuery(jsessionid, sql) {
-  const url = '/mge/service.sbr?serviceName=DbExplorerSP.executeQuery&outputType=json';
+  const url = 'http://sankhya2.nxboats.com.br:8180/mge/service.sbr?serviceName=DbExplorerSP.executeQuery&outputType=json';
   const payload = { serviceName: "DbExplorerSP.executeQuery", requestBody: { sql, outputType: "json" } };
   const r = await sankhya.post(url, payload, { headers: { Cookie: `JSESSIONID=${jsessionid}` }});
   if (r.status >= 400) throw new Error(`HTTP ${r.status}`);
@@ -120,7 +120,7 @@ async function sankhyaQuery(jsessionid, sql) {
 }
 
 async function sankhyaExecUpdate(jsessionid, sql) {
-  const url = '/mge/service.sbr?serviceName=DbExplorerSP.executeUpdate&outputType=json';
+  const url = 'http://sankhya2.nxboats.com.br:8180/mge/service.sbr?serviceName=DbExplorerSP.executeUpdate&outputType=json';
   const payload = { serviceName: "DbExplorerSP.executeUpdate", requestBody: { sql, outputType: "json" } };
   const r = await sankhya.post(url, payload, { headers: { Cookie: `JSESSIONID=${jsessionid}` } });
   if (r.status >= 400) throw new Error(`HTTP ${r.status}`);
@@ -222,7 +222,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     res.json({ token, name, codusu, codvend });
   } catch (err) {
-    console.error('Falha login:', err?.response?.data || err.message);
+    console.error('Falha login:', err?.response?.data || err.message || SANKHYA_URL);
     res.status(401).json({ erro: 'Falha no login' });
   }
 });
@@ -1090,6 +1090,61 @@ app.get('/api/producao/financeiro', auth, async (req, res) => {
   }
 });
 
+// GET /api/producao/pedido?ident=<IDENTIFICACAO>
+app.get('/api/producao/pedido', auth, async (req, res) => {
+  try {
+    const ident = String(req.query.ident || '').trim();
+    if (!ident) return res.status(400).json({ erro: "Parâmetro 'ident' obrigatório" });
+
+    const safe = ident.replace(/'/g, "''");
+    const sql = `
+      SELECT
+          CAB.NUNOTA ,
+          CAB.CODPARC ,
+          PAR.NOMEPARC , 
+          CAB.OBSERVACAO , 
+          AD_EXPORTACAO , 
+          CAB.AD_CORDOEVA ,
+          CAB.AD_CORDOBARCO , 
+          CAB.AD_CORESTOFADO,
+          VEN.APELIDO
+          FROM TGFCAB CAB 
+          JOIN TGFPAR PAR ON PAR.CODPARC = CAB.CODPARC 
+          JOIN TGFVEN VEN ON VEN.CODVEND = CAB.CODVEND
+          JOIN TCSPRJ PRJ ON PRJ.CODPROJ = CAB.CODPROJ
+          WHERE PRJ.IDENTIFICACAO = '${safe}'
+          AND CAB.TIPMOV = 'P'
+      
+    `.trim();
+
+    const rows = await withUserSession(req, (js) => sankhyaQuery(js, sql));
+
+    const items = rows.map(r => ({
+      nunota: String(r[0] ?? ''),
+      codparc: String(r[1] ?? ''),
+      nomeparc: String(r[2] ?? 0),
+      observacao: String(r[3] ?? 0),
+      ad_exportacao: String(r[4] ?? 0),
+      ad_cordoeva: String(r[5] ?? 0),
+      ad_cordobarco: String(r[6] ?? ''),
+      corestofado: String(r[7] ?? 0),
+      apelido: String(r[8] ?? 0),
+    
+    }));
+
+    res.json({ items });
+  } catch (err) {
+    console.error('GET /api/producao/pedido', err?.response?.data || err.message);
+    res.status(500).json({ erro: 'Falha ao consultar financeiro' });
+  }
+});
+
+
+
+
+
+
+
 // --- helpers para datas BR/ISO ---
 function isBR(s) { return /^\d{2}\/\d{2}\/\d{4}$/.test(s); }
 function isISO(s) { return /^\d{4}-\d{2}-\d{2}$/.test(s); }
@@ -1353,6 +1408,78 @@ ORDER BY PRJ.IDENTIFICACAO
     return res.status(500).json({ erro: 'Falha ao consultar DRE por barco' });
   }
 });
+
+
+// ===== DatasetSP.save (equivalente à sua função Dart) =====
+async function sankhyaDatasetSave(jsessionid, params) {
+  const {
+    entity,
+    fields,
+    pk = null,
+    fk = null,            // vira "foreignKey"
+    values,
+    crudListener = null,  // opcional
+  } = params || {};
+
+  if (!entity || !Array.isArray(fields) || !values) {
+    throw new Error("Parâmetros inválidos: 'entity', 'fields[]' e 'values' são obrigatórios.");
+  }
+
+  const payload = {
+    serviceName: "DatasetSP.save",
+    requestBody: {
+      ...(crudListener ? { crudListener } : {}),
+      entityName: entity,
+      fields,
+      records: [
+        {
+          ...(pk ? { pk } : {}),
+          ...(fk ? { foreignKey: fk } : {}),
+          values,
+        },
+      ],
+    },
+  };
+
+  const url = "http://sankhya2.nxboats.com.br:8180/mge/service.sbr?serviceName=DatasetSP.save&application=DynaformLauncher&outputType=json";
+
+  const r = await sankhya.post(url, payload, {
+    headers: { Cookie: `JSESSIONID=${jsessionid}` },
+  });
+
+  if (r.status >= 400) throw new Error(`HTTP ${r.status}`);
+  if (bodyLooksExpired(r.data)) throw new Error("SANKHYA_SESSION_EXPIRED");
+
+  return {
+    STATUS: r.data?.status,
+    REQUISICAO: payload,
+    RETORNO: r.data,
+  };
+}
+
+// POST /api/sankhya/dataset/save
+// body: { entity, fields: string[], pk?, fk?, values: object, crudListener? }
+app.post("/api/sankhya/dataset/save", auth, async (req, res) => {
+  try {
+    const { entity, fields, pk, fk, values, crudListener } = req.body || {};
+    if (!entity || !Array.isArray(fields) || !values) {
+      return res.status(400).json({
+        erro: "Parâmetros inválidos: 'entity', 'fields[]' e 'values' são obrigatórios.",
+      });
+    }
+
+    const out = await withUserSession(req, (js) =>
+      sankhyaDatasetSave(js, { entity, fields, pk, fk, values, crudListener })
+    );
+
+    res.json(out);
+  } catch (err) {
+    console.error("POST /api/sankhya/dataset/save:", err?.response?.data || err.message);
+    res.status(500).json({ erro: "Falha no DatasetSP.save", detalhe: err?.message || undefined });
+  }
+});
+
+
 
 
 // Teste autenticado
