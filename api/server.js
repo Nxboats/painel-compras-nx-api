@@ -12,9 +12,9 @@ const app = express();
 /* ===================== CONFIG ===================== */
 const SANKHYA_URL = 'http://sankhya2.nxboats.com.br:8180';
 const JWT_SECRET   = process.env.JWT_SECRET || 'mude-este-segredo';
-const PORT         = process.env.PORT || 3000;
+const PORT         = process.env.PORT || 3200;
 
-const ORIGINS = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || 'http://localhost:5173')
+const ORIGINS = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || 'http://192.168.1.155:3100')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 const corsOptions = {
