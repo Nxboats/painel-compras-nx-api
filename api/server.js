@@ -300,6 +300,7 @@ WHERE CAB.NUNOTA = ${nunota}
     const sqlItems = `
 SELECT
   ITE.NUNOTA,
+  ITE.SEQUENCIA,
   ITE.CODPROD,
   PRO.DESCRPROD,
   PRO.CODVOL,
@@ -321,12 +322,13 @@ ORDER BY 2 ASC
     const iRows = await sankhyaQuery(js, sqlItems);
     const items = iRows.map(r => ({
       nunota: Number(r[0]),
-      codprod: Number(r[1]),
-      descrprod: String(r[2] ?? '').trim(),
-      codvol: String(r[3] ?? '').trim(),
-      qtd: Number(r[4] ?? 0),
-      vlrpedi: Number(r[5] ?? 0),
-      vlrunit: Number(r[6] ?? 0),
+      sequencia: Number(r[1]),
+      codprod: Number(r[2]),
+      descrprod: String(r[3] ?? '').trim(),
+      codvol: String(r[4] ?? '').trim(),
+      qtd: Number(r[5] ?? 0),
+      vlrpedi: Number(r[6] ?? 0),
+      vlrunit: Number(r[7] ?? 0),
     }));
 
     return res.json({ header, items });
