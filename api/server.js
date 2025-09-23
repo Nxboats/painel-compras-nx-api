@@ -14,7 +14,7 @@ const SANKHYA_URL = 'http://sankhya2.nxboats.com.br:8180';
 const JWT_SECRET   = process.env.JWT_SECRET || 'mude-este-segredo';
 const PORT         = process.env.PORT || 3200;
 
-const ORIGINS = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || 'http://192.168.1.155:3100')
+const ORIGINS = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || 'http://192.168.1.155:3100'  ||  'http://192.168.0.176:3100')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 const corsOptions = {
@@ -1381,6 +1381,101 @@ app.post('/api/pedidos/incluir', auth, async (req, res) => {
       },
       RETORNO: { erro: 'Falha ao incluir pedido', detalhe: err?.message || 'Erro desconhecido' },
     });
+  }
+});
+
+
+// ============ /api/obter-reg ============
+// POST body: { consulta: string, refreshToken?: boolean, pageSize?: number, maxPages?: number }
+app.post('/api/obter-reg', auth, async (req, res) => {
+  try {
+    const { usuario, senha } = req.user;             // pego do JWT (já tem no seu middleware)
+    const js = await sankhyaLogin(usuario, senha);   // reloga a cada chamada
+
+    let { consulta = '', refreshToken = false, pageSize = 4500, maxPages = 25 } = req.body || {};
+    consulta = String(consulta || '').trim();
+
+    // Higiene & segurança mínimas:
+    if (!consulta) return res.status(400).json({ erro: 'Parâmetro "consulta" obrigatório.' });
+    const startsWithSelect = /^\s*(with|select)\s/i.test(consulta);
+    if (!startsWithSelect) {
+      return res.status(400).json({ erro: 'Apenas SELECT é permitido nesta rota.' });
+    }
+    // Evita DDL/DML escondidos...
+    if (/\b(insert|update|delete|merge|alter|drop|truncate|grant|revoke)\b/i.test(consulta)) {
+      return res.status(400).json({ erro: 'Comandos DML/DDL não são permitidos.' });
+    }
+
+    // Monta a função que pagina via ROW_NUMBER, igual no Flutter
+    const pageQuery = (linhaIni, linhaFin) => `
+      SELECT B.*
+      FROM (
+        SELECT ROW_NUMBER() OVER (ORDER BY A.ORD) AS LN, A.*
+        FROM (
+          SELECT 1 AS ORD, K.* FROM (
+            ${consulta}
+          ) K
+        ) A
+      ) B
+      WHERE LN >= ${linhaIni} AND LN <= ${linhaFin}
+    `;
+
+    const rowsOut = [];
+    let page = 0;
+
+    while (page < Number(maxPages)) {
+      const start = page === 0 ? 0 : page * Number(pageSize);
+      const finish = (page + 1) * Number(pageSize);
+
+      const sql = pageQuery(start, finish);
+      const payload = {
+        serviceName: "DbExplorerSP.executeQuery",
+        requestBody: { sql }
+      };
+
+      const r = await sankhya.post(
+        '/mge/service.sbr?serviceName=DbExplorerSP.executeQuery&outputType=json',
+        payload,
+        { headers: { Cookie: `JSESSIONID=${js}` }, timeout: 60000 }
+      );
+
+      if (r.status >= 400) throw new Error(`HTTP ${r.status}`);
+      const body = r.data || {};
+      const status = String(body?.status ?? '');
+      if (status === '1') {
+        const listRows = body?.responseBody?.rows || [];
+        const meta = body?.responseBody?.fieldsMetadata || [];
+        for (const reg of listRows) {
+          const obj = {};
+          for (let j = 0; j < reg.length; j++) {
+            const name = meta?.[j]?.name || `COL_${j}`;
+            obj[name] = reg[j];
+          }
+          rowsOut.push(obj);
+        }
+        if (listRows.length < Number(pageSize)) break; // última página
+      } else if (status === '3' || status === '4') {
+        // 3: sessão expirada / 4: algo parecido (dependendo do seu Sankhya)
+        // reloga e tenta novamente esta página
+        const js2 = await sankhyaLogin(usuario, senha);
+        page = page; // mesma página
+        continue;
+      } else {
+        return res.status(500).json({ erro: 'Falha ao executar consulta', detalhe: body });
+      }
+
+      page++;
+    }
+
+    // opcional: se quiser “terminar” a sessão
+    if (refreshToken) {
+      // não temos logout de sessão aqui; como você reloga sempre, pode ignorar.
+    }
+
+    return res.json({ rows: rowsOut });
+  } catch (err) {
+    console.error('Erro /api/obter-reg:', err?.response?.data || err.message);
+    return res.status(500).json({ erro: 'Falha ao executar consulta', detalhe: err?.message || undefined });
   }
 });
 
