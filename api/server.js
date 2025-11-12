@@ -5,22 +5,47 @@ const axios = require('axios');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const iconv = require('iconv-lite');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { bethChat, bethStream } = require('./services/bethService'); // ✅ Llama/Ollama
 
 const app = express();
 
 /* ===================== CONFIG ===================== */
-const SANKHYA_URL = 'http://sankhya2.nxboats.com.br:8180';
+const SANKHYA_URL = process.env.SANKHYA_URL || 'http://sankhya2.nxboats.com.br:8180';
 const JWT_SECRET   = process.env.JWT_SECRET || 'mude-este-segredo';
-const PORT         = process.env.PORT || 3200;
+const PORT         = process.env.PORT || 3200; // ajuste aqui se quiser rodar em 3000
 
-const ORIGINS = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || 'http://192.168.1.155:3100'  ||  'http://192.168.0.176:3100')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// CORS: lista padrão + variável de ambiente CORS_ORIGINS (separada por vírgula)
+const DEFAULT_ORIGINS = [
+  'http://192.168.1.155:3100', 'http://192.168.0.176:3101','http://192.169.5.77:3101','http://10.0.0.121:3100',
+  'http://192.169.5.140:3100',
+  'http://192.168.0.176:3100',
+  'http://sankhya.nxboats.com.br:3100',
+  'http://localhost:3100',
+  'http://192.168.0.135:3100',
+  'http://localhost:5173',
+  'http://10.0.0.115:3100',
+  'http://192.169.5.252:5173',
+  'http://192.169.5.249:5173',
+  'http://127.0.0.1:3100', 'http://192.168.0.135:3101',
+  'http://sankhya.nxboats.com.br:3500' , 'http://192.169.5.138:3100' , 'http://192.169.5.136:3101' , 'http://192.169.5.136:3100' ,
+  'http://192.169.5.137:5173' , 'http://192.169.5.137:3100' , 'http://192.169.5.77:3100', 'http://192.168.1.118:3100',
+];
+
+const ORIGINS = (process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',')
+  : DEFAULT_ORIGINS
+).map(s => s.trim()).filter(Boolean);
+
+// Regex opcional para aceitar todo domínio nxboats.com.br (qualquer subdomínio e porta)
+const ORIGIN_REGEX = [
+  /^https?:\/\/([a-z0-9-]+\.)*nxboats\.com\.br(?::\d+)?$/i
+];
 
 const corsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    if (ORIGINS.includes(origin)) return cb(null, true);
+    if (!origin) return cb(null, true); // ex: curl/postman/healthchecks
+    const allowed = ORIGINS.includes(origin) || ORIGIN_REGEX.some(rx => rx.test(origin));
+    if (allowed) return cb(null, true);
     return cb(new Error(`CORS: Origin não permitida: ${origin}`));
   },
   credentials: true,
@@ -32,10 +57,16 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 
+// Debug opcional de Origin
+app.use((req, _res, next) => {
+  if (req.headers.origin) console.log('Origin:', req.headers.origin);
+  next();
+});
+
 /* ===================== HTTP CLIENT SANKHYA ===================== */
 const sankhya = axios.create({
   baseURL: SANKHYA_URL,
-  timeout: 20000,
+  timeout: 60000,
   headers: { 'Content-Type': 'application/json' },
   responseType: 'arraybuffer',
   transformResponse: [(data, headers) => {
@@ -202,43 +233,43 @@ app.get('/api/pedidos', auth, async (req, res) => {
 
     const where = filtros.join(' AND ');
     const sql = `
-SELECT
-  PEDI.NUNOTA,
-  PAR.NOMEPARC,
-  SUM(ITE.VLRUNIT * (ITE.QTDNEG - ITE.QTDENTREGUE)) AS VLRPEDI,
-  TO_CHAR(PEDI.DTNEG, 'YYYY-MM-DD"T"HH24:MI:SS')       AS DTNEG_ISO,
-  PEDI.VLRNOTA,
-  TO_CHAR(PEDI.DTPREVENT, 'YYYY-MM-DD"T"HH24:MI:SS')   AS DTPREVENT_ISO,
-  CASE
-    WHEN PEDI.DTPREVENT IS NULL THEN 'SEM PREVISÃO'
-    WHEN PEDI.DTPREVENT - SYSDATE < 0 THEN 'ATRASADO'
-    ELSE 'PLANEJADO'
-  END AS STATUS,
-  case when nvl(AD_STATUSPED,'1') ='1' then 'Pedido em aprovação'
-when nvl(PEDI.AD_STATUSPED,'1') ='2' then 'Em Produção'
-when nvl(PEDI.AD_STATUSPED,'1') ='3' then 'Aguardando embarque'
-when nvl(PEDI.AD_STATUSPED,'1') ='4' then 'Em Transito'
-when nvl(PEDI.AD_STATUSPED,'1') ='5' then 'Aguardando Liberação'
-when nvl(PEDI.AD_STATUSPED,'1') ='6' then 'Desembaraçado'
-when nvl(PEDI.AD_STATUSPED,'1') ='7' then 'Recebido'
-when nvl(PEDI.AD_STATUSPED,'1') ='8' then 'Perdimento/Avaria'
-when nvl(PEDI.AD_STATUSPED,'1') ='9' then 'Cancelado' end AS STATUSPED
-, CASE 
-WHEN MAX(REPROVADO) = 'S' THEN 'REPROVADO'
-WHEN MAX(LIB.VLRLIBERADO) = 0 THEN 'EM DIRETORIA'
-WHEN NVL(MAX(LIB.VLRLIBERADO),-1) = -1 THEN 'EM GERENCIA'
-WHEN NVL(MAX(LIB.VLRLIBERADO),-1) > 0 AND MAX(REPROVADO) = 'N' THEN 'APROVADO'
+      SELECT
+        PEDI.NUNOTA,
+        PAR.NOMEPARC,
+        SUM(ITE.VLRUNIT * (ITE.QTDNEG - ITE.QTDENTREGUE)) AS VLRPEDI,
+        TO_CHAR(PEDI.DTNEG, 'YYYY-MM-DD"T"HH24:MI:SS')       AS DTNEG_ISO,
+        PEDI.VLRNOTA,
+        TO_CHAR(PEDI.DTPREVENT, 'YYYY-MM-DD"T"HH24:MI:SS')   AS DTPREVENT_ISO,
+        CASE
+          WHEN PEDI.DTPREVENT IS NULL THEN 'SEM PREVISÃO'
+          WHEN PEDI.DTPREVENT - SYSDATE < 0 THEN 'ATRASADO'
+          ELSE 'PLANEJADO'
+        END AS STATUS,
+        case when nvl(AD_STATUSPED,'1') ='1' then 'Pedido em aprovação'
+      when nvl(PEDI.AD_STATUSPED,'1') ='2' then 'Em Produção'
+      when nvl(PEDI.AD_STATUSPED,'1') ='3' then 'Aguardando embarque'
+      when nvl(PEDI.AD_STATUSPED,'1') ='4' then 'Em Transito'
+      when nvl(PEDI.AD_STATUSPED,'1') ='5' then 'Aguardando Liberação'
+      when nvl(PEDI.AD_STATUSPED,'1') ='6' then 'Desembaraçado'
+      when nvl(PEDI.AD_STATUSPED,'1') ='7' then 'Recebido'
+      when nvl(PEDI.AD_STATUSPED,'1') ='8' then 'Perdimento/Avaria'
+      when nvl(PEDI.AD_STATUSPED,'1') ='9' then 'Cancelado' end AS STATUSPED
+      , CASE 
+      WHEN MAX(REPROVADO) = 'S' THEN 'REPROVADO'
+      WHEN MAX(LIB.VLRLIBERADO) = 0 THEN 'EM DIRETORIA'
+      WHEN NVL(MAX(LIB.VLRLIBERADO),-1) = -1 THEN 'EM GERENCIA'
+      WHEN NVL(MAX(LIB.VLRLIBERADO),-1) > 0 AND MAX(REPROVADO) = 'N' THEN 'APROVADO'
 
- END AS STATUSLIB,
- MAX(OBSLIB) AS OBSREPROVADO
+      END AS STATUSLIB,
+      MAX(OBSLIB) AS OBSREPROVADO
 
-FROM TGFCAB PEDI
-JOIN TGFITE ITE ON ITE.NUNOTA = PEDI.NUNOTA
-JOIN TGFPAR PAR ON PAR.CODPARC = PEDI.CODPARC
-LEFT JOIN TSILIB LIB ON LIB.NUCHAVE = PEDI.NUNOTA AND LIB.EVENTO = 1009
-WHERE ${where}
-GROUP BY PEDI.NUNOTA, PAR.NOMEPARC, PEDI.DTNEG, PEDI.VLRNOTA, PEDI.DTPREVENT , PEDI.AD_STATUSPED
-ORDER BY 3 DESC
+      FROM TGFCAB PEDI
+      JOIN TGFITE ITE ON ITE.NUNOTA = PEDI.NUNOTA
+      JOIN TGFPAR PAR ON PAR.CODPARC = PEDI.CODPARC
+      LEFT JOIN TSILIB LIB ON LIB.NUCHAVE = PEDI.NUNOTA AND LIB.EVENTO = 1009
+      WHERE ${where}
+      GROUP BY PEDI.NUNOTA, PAR.NOMEPARC, PEDI.DTNEG, PEDI.VLRNOTA, PEDI.DTPREVENT , PEDI.AD_STATUSPED
+      ORDER BY 3 DESC
     `.trim();
 
     const rows = await sankhyaQuery(js, sql);
@@ -464,7 +495,7 @@ FROM AD_TGFPROCOM COM
 JOIN TGFPAR PAR ON PAR.CODPARC = COM.CODPARC
 WHERE COM.CODVEND = ${Number(codvend||0)}
   AND COM.NECESSIDADE > 0
-  AND COM.DTRUTURA <= SYSDATE + ${dias}
+  AND COM.DTMELHORPED  <= SYSDATE + ${dias}
   ${filtroFornecedor}
 GROUP BY PAR.CODPARC, PAR.NOMEPARC
 ORDER BY QTDPROD DESC
@@ -515,7 +546,7 @@ SELECT
     JOIN TGFPRO PRO ON PRO.CODPROD = COM.CODPROD
     WHERE COM.CODVEND = ${Number(codvend||0)}
       AND COM.CODPARC = ${codparc}
-      AND COM.DTMELHORPED <= SYSDATE - ${dias}
+      AND COM.DTMELHORPED <= SYSDATE + ${dias}
       AND COM.NECESSIDADE > 0
     ORDER BY PRO.DESCRPROD ASC
 `.trim();
@@ -686,14 +717,9 @@ ORDER BY REG.CODAVARIA DESC, ITE.SEQUENCIA ASC
   }
 });
 
-/* ===================== AI SUPRIMENTOS ===================== */
-const genAIKey = 'AIzaSyCOTFRIHQLZTkspuzy1wAiiVOJcy_-ON2M';
-const genAI = genAIKey ? new GoogleGenerativeAI(genAIKey) : null;
-
+/* ===================== AI SUPRIMENTOS (chat — Llama/Beth) ===================== */
 app.post('/api/ai/chat', auth, async (req, res) => {
   try {
-    if (!genAI) return res.status(500).json({ erro: 'GOOGLE_API_KEY não configurada no .env' });
-
     const { usuario, senha } = req.user;
     const js = await sankhyaLogin(usuario, senha);
 
@@ -709,7 +735,7 @@ app.post('/api/ai/chat', auth, async (req, res) => {
       ? `AND UPPER(PAR.NOMEPARC) LIKE '%${String(fornecedor).toUpperCase().replace(/'/g,"''")}%'`
       : '';
     const filtroGrupo = grupo
-      ? `AND (UPPER(NVL(GRU.DESCRGRU,'')) LIKE '%${String(grupo).toUpperCase().replace(/'/g,"''")}%' OR TO_CHAR(NVL(PRO.CODGRUPO,0)) = '${String(grupo).replace(/'/g,"''")}')`
+      ? `AND (UPPER(NVL(GRU.DESCRGRUPOPROD,'')) LIKE '%${String(grupo).toUpperCase().replace(/'/g,"''")}%' OR TO_CHAR(NVL(PRO.CODGRUPOPROD,0)) = '${String(grupo).replace(/'/g,"''")}')`
       : '';
 
     const sql = `
@@ -799,36 +825,20 @@ WHERE 1=1
       }, {})
     );
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    const contextJson = JSON.stringify({
+    const contextJson = {
       parametros: { safetyDays, top, filtroFornecedor: fornecedor || null, filtroGrupo: grupo || null },
       totais: { itensAvaliados: items.length, itensEmRisco: risco.length },
       rankingRisco: risco,
       porFornecedor: byFornecedor,
       porGrupo: byGrupo
-    }, null, 2);
+    };
 
-    const system = `
-Você é um agente de suprimentos. Responda em PT-BR, direto e acionável.
-Use SOMENTE os dados fornecidos no JSON abaixo, sem inventar números.
-Explique critério: cobertura <= leadtime + safetyDays OU disponibilidade <= 0.
-Dê um sumário por fornecedor e por grupo, e destaque top 10 itens mais críticos com sugestão de compra.
-Inclua sempre as fórmulas de cálculo no rodapé (curta).
-    `.trim();
-
-    const prompt = `${system}
-
-=== DADOS ===
-\`\`\`json
-${contextJson}
-\`\`\`
-
-=== MENSAGEM DO USUÁRIO ===
-"${String(message || '').slice(0, 2000)}"
-`;
-
-    const result = await model.generateContent(prompt);
-    const reply = result?.response?.text?.() || result?.response?.text || 'Não foi possível gerar a resposta.';
+    // Chama Beth (Llama/Ollama)
+    const reply = await bethChat({
+      pergunta: String(message || '').slice(0, 2000),
+      contexto: JSON.stringify(contextJson),
+      notas: null
+    });
 
     return res.json({
       reply,
@@ -844,6 +854,197 @@ ${contextJson}
     console.error('Erro /api/ai/chat:', err?.response?.data || err.message);
     return res.status(500).json({ erro: 'Falha no agente de suprimentos' });
   }
+});
+
+/* ===================== AI SUPRIMENTOS (SSE stream via Beth) ===================== */
+// Auth por query (?auth=JWT) porque EventSource não envia Authorization header
+function authSSE(req, res, next) {
+  try {
+    const token = String(req.query?.auth || '').trim();
+    if (!token) return res.status(401).end('event: error\ndata: {"message":"Token ausente"}\n\n');
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).end('event: error\ndata: {"message":"Token inválido"}\n\n');
+  }
+}
+
+// util: envia bloco SSE (opcionalmente com nome de evento)
+function sseSend(res, data, event) {
+  if (event) res.write(`event: ${event}\n`);
+  res.write(`data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`);
+}
+
+// health/heartbeat p/ manter o proxy aberto
+function sseHeartbeat(res) {
+  res.write(`: ping\n\n`);
+}
+
+app.get('/api/ai/chat/stream', authSSE, async (req, res) => {
+  // cabeçalhos SSE
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  // dica para Nginx/Cloudflare não bufferizar
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  // heartbeat a cada 15s
+  const hb = setInterval(() => sseHeartbeat(res), 15000);
+
+  const close = (code = 200) => {
+    clearInterval(hb);
+    try { res.statusCode = code; } catch {}
+    try { res.end(); } catch {}
+  };
+
+  try {
+    const { usuario, senha } = req.user;
+    const js = await sankhyaLogin(usuario, senha);
+
+    // parâmetros da query
+    const message      = String(req.query?.message || '').slice(0, 4000);
+    const fornecedorQ  = String(req.query?.fornecedor || '').trim();
+    const grupoQ       = String(req.query?.grupo || '').trim();
+    const safetyDays   = Number(req.query?.safetyDays ?? 5);
+    const top          = Number(req.query?.top ?? 30);
+
+    if (!message) {
+      sseSend(res, { message: 'Parâmetro "message" obrigatório.' }, 'error');
+      return close(400);
+    }
+
+    // filtros SQL (mesma lógica do /api/ai/chat)
+    const filtroFornecedor = fornecedorQ
+      ? `AND UPPER(PAR.NOMEPARC) LIKE '%${fornecedorQ.toUpperCase().replace(/'/g,"''")}%'`
+      : '';
+    const filtroGrupo = grupoQ
+      ? `AND (UPPER(NVL(GRU.DESCRGRUPOPROD,'')) LIKE '%${grupoQ.toUpperCase().replace(/'/g,"''")}%' OR TO_CHAR(NVL(PRO.CODGRUPOPROD,0)) = '${grupoQ.replace(/'/g,"''")}')`
+      : '';
+
+    const sql = `
+SELECT
+  PAR.CODPARC,
+  PAR.NOMEPARC,
+  PRO.CODPROD,
+  PRO.DESCRPROD,
+  PRO.CODVOL,
+  NVL(PRO.CODGRUPOPROD,0) AS CODGRUPO,
+  NVL(GRU.DESCRGRUPOPROD,'') AS DESCRGRU,
+  NVL(COM.LEADTIME,0) AS LEADTIME,
+  NVL(COM.ESTOQUE,0) AS ESTOQUE,
+  NVL(COM.EMPENHO,0) AS EMPENHO,
+  NVL(COM.COMPRAPEN,0) AS COMPRAPEN,
+  NVL(COM.GIROMENSAL,0) AS GIROMENSAL,
+  TO_CHAR(COM.DTMELHORPED, 'YYYY-MM-DD"T"HH24:MI:SS') AS DTMELHORPED_ISO
+FROM AD_TGFPROCOM COM
+JOIN TGFPAR PAR ON PAR.CODPARC = COM.CODPARC
+JOIN TGFPRO PRO ON PRO.CODPROD = COM.CODPROD
+LEFT JOIN TGFGRU GRU ON GRU.CODGRUPOPROD = PRO.CODGRUPOPROD
+WHERE 1=1
+  ${filtroFornecedor}
+  ${filtroGrupo}
+`.trim();
+
+    const rows = await sankhyaQuery(js, sql);
+
+    const items = rows.map(r => {
+      const codparc     = Number(r[0]);
+      const fornecedor  = String(r[1] ?? '').trim();
+      const codprod     = Number(r[2]);
+      const descrprod   = String(r[3] ?? '').trim();
+      const codvol      = String(r[4] ?? '').trim();
+      const codgrupo    = Number(r[5] ?? 0);
+      const descrgru    = String(r[6] ?? '').trim();
+      const leadtime    = Number(r[7] ?? 0);
+      const estoque     = Number(r[8] ?? 0);
+      const empenho     = Number(r[9] ?? 0);
+      const comprapen   = Number(r[10] ?? 0);
+      const giromensal  = Number(r[11] ?? 0);
+      const dtmelhorped = r[12] || null;
+
+      const disp     = estoque - empenho + comprapen;
+      const consumoD = giromensal > 0 ? (giromensal / 30) : 0;
+      const cobertura = consumoD > 0 ? (disp / consumoD) : (disp > 0 ? 9999 : 0);
+      const criticoEmDias = leadtime + Number(safetyDays || 0);
+      const emRisco = cobertura <= criticoEmDias || disp <= 0;
+      const necessidadeSugerida = Math.max(0, Math.ceil((consumoD * criticoEmDias) - disp));
+
+      return {
+        codparc, fornecedor,
+        codprod, descrprod, codvol,
+        codgrupo, descrgru,
+        leadtime, estoque, empenho, comprapen, giromensal, dtmelhorped,
+        disp, consumoDia: consumoD,
+        coberturaDias: Number.isFinite(cobertura) ? Number(cobertura.toFixed(1)) : cobertura,
+        risco: emRisco,
+        sugestaoCompra: necessidadeSugerida
+      };
+    });
+
+    const risco = items
+      .filter(it => it.risco)
+      .sort((a,b) => (a.coberturaDias ?? 99999) - (b.coberturaDias ?? 99999))
+      .slice(0, Math.max(5, Math.min(200, Number(top)||30)));
+
+    const porFornecedor = Object.values(
+      risco.reduce((acc, it) => {
+        const k = it.codparc;
+        if (!acc[k]) acc[k] = { codparc: it.codparc, fornecedor: it.fornecedor, itens: 0, sugestaoTotal: 0, dispTotal: 0 };
+        acc[k].itens += 1;
+        acc[k].sugestaoTotal += it.sugestaoCompra || 0;
+        acc[k].dispTotal += it.disp || 0;
+        return acc;
+      }, {})
+    );
+
+    const porGrupo = Object.values(
+      risco.reduce((acc, it) => {
+        const k = it.codgrupo;
+        if (!acc[k]) acc[k] = { codgrupo: it.codgrupo, grupo: it.descrgru, itens: 0, sugestaoTotal: 0, dispTotal: 0 };
+        acc[k].itens += 1;
+        acc[k].sugestaoTotal += it.sugestaoCompra || 0;
+        acc[k].dispTotal += it.disp || 0;
+        return acc;
+      }, {})
+    );
+
+    const contextJson = {
+      parametros: { safetyDays, top, filtroFornecedor: fornecedorQ || null, filtroGrupo: grupoQ || null },
+      totais: { itensAvaliados: items.length, itensEmRisco: risco.length },
+      rankingRisco: risco,
+      porFornecedor,
+      porGrupo
+    };
+
+    // dispara o streaming da Beth
+    bethStream({
+      pergunta: message,
+      contexto: JSON.stringify(contextJson),
+      notas: null,
+      onToken: (t) => {
+        // cada pedacinho do modelo vai em "event: token"
+        sseSend(res, t, 'token');
+      },
+      onDone: () => {
+        // payload final com a análise estruturada (para preencher suas tabelas)
+        sseSend(res, { ok: true, analysis: { safetyDays, top, risco, porFornecedor, porGrupo } }, 'done');
+        close(200);
+      }
+    }).catch((e) => {
+      sseSend(res, { message: String(e?.message || e) }, 'error');
+      close(500);
+    });
+
+  } catch (err) {
+    sseSend(res, { message: String(err?.message || err) }, 'error');
+    close(500);
+  }
+
+  // encerra se o cliente desconectar
+  req.on('close', () => {
+    clearInterval(hb);
+    try { res.end(); } catch {}
+  });
 });
 
 /* ===================== PROGRAMAÇÃO: KANBAN ===================== */
@@ -1384,9 +1585,7 @@ app.post('/api/pedidos/incluir', auth, async (req, res) => {
   }
 });
 
-
 // ============ /api/obter-reg ============
-// POST body: { consulta: string, refreshToken?: boolean, pageSize?: number, maxPages?: number }
 app.post('/api/obter-reg', auth, async (req, res) => {
   try {
     const { usuario, senha } = req.user;             // pego do JWT (já tem no seu middleware)
@@ -1395,18 +1594,11 @@ app.post('/api/obter-reg', auth, async (req, res) => {
     let { consulta = '', refreshToken = false, pageSize = 4500, maxPages = 25 } = req.body || {};
     consulta = String(consulta || '').trim();
 
-    // Higiene & segurança mínimas:
     if (!consulta) return res.status(400).json({ erro: 'Parâmetro "consulta" obrigatório.' });
-    const startsWithSelect = /^\s*(with|select)\s/i.test(consulta);
-    if (!startsWithSelect) {
-      return res.status(400).json({ erro: 'Apenas SELECT é permitido nesta rota.' });
-    }
-    // Evita DDL/DML escondidos...
     if (/\b(insert|update|delete|merge|alter|drop|truncate|grant|revoke)\b/i.test(consulta)) {
       return res.status(400).json({ erro: 'Comandos DML/DDL não são permitidos.' });
     }
 
-    // Monta a função que pagina via ROW_NUMBER, igual no Flutter
     const pageQuery = (linhaIni, linhaFin) => `
       SELECT B.*
       FROM (
@@ -1455,10 +1647,8 @@ app.post('/api/obter-reg', auth, async (req, res) => {
         }
         if (listRows.length < Number(pageSize)) break; // última página
       } else if (status === '3' || status === '4') {
-        // 3: sessão expirada / 4: algo parecido (dependendo do seu Sankhya)
-        // reloga e tenta novamente esta página
         const js2 = await sankhyaLogin(usuario, senha);
-        page = page; // mesma página
+        void js2; // não utilizado aqui, pois relogamos por chamada
         continue;
       } else {
         return res.status(500).json({ erro: 'Falha ao executar consulta', detalhe: body });
@@ -1467,9 +1657,8 @@ app.post('/api/obter-reg', auth, async (req, res) => {
       page++;
     }
 
-    // opcional: se quiser “terminar” a sessão
     if (refreshToken) {
-      // não temos logout de sessão aqui; como você reloga sempre, pode ignorar.
+      // opcional: finalizar sessão — como você reloga sempre, pode ignorar.
     }
 
     return res.json({ rows: rowsOut });
@@ -1479,11 +1668,245 @@ app.post('/api/obter-reg', auth, async (req, res) => {
   }
 });
 
-
 /* ===================== WHOAMI ===================== */
 app.get('/api/whoami', auth, (req, res) => {
   const { usuario, codvend, name } = req.user || {};
   res.json({ user: { usuario, codvend, name }, hasSankhya: true });
+});
+
+// --- utils de consulta mapeada ---
+async function executarSQLObjects(req, sql) {
+  const { usuario, senha } = req.user || {};
+  if (!usuario || !senha) throw new Error("Sessão inválida (auth obrigatório)");
+
+  const js = await sankhyaLogin(usuario, senha);
+
+  const payload = {
+    serviceName: "DbExplorerSP.executeQuery",
+    requestBody: { sql }
+  };
+
+  const r = await sankhya.post(
+    '/mge/service.sbr?serviceName=DbExplorerSP.executeQuery&outputType=json',
+    payload,
+    { headers: { Cookie: `JSESSIONID=${js}` }, timeout: 60000 }
+  );
+
+  if (r.status >= 400) throw new Error(`HTTP ${r.status}`);
+  const body = r.data || {};
+  if (String(body?.status ?? '') !== '1') {
+    throw new Error('Falha ao executar SELECT no Sankhya');
+  }
+
+  const rows = body?.responseBody?.rows || [];
+  const meta = body?.responseBody?.fieldsMetadata || [];
+
+  const list = rows.map((reg) => {
+    const obj = {};
+    for (let j = 0; j < reg.length; j++) {
+      const name = meta?.[j]?.name || `COL_${j}`;
+      obj[name] = reg[j];
+    }
+    return obj;
+  });
+
+  return list;
+}
+
+// ================================================
+// IA Beth: análise do pedido (mantido)
+// ================================================
+app.post("/api/beth/analisar", auth, async (req, res) => {
+  try {
+    const { nunota } = req.body || {};
+    const nunotaNum = Number(nunota);
+    if (!nunotaNum) {
+      return res.status(400).json({ erro: 'Parâmetro "nunota" obrigatório.' });
+    }
+
+    // 1) NECESSIDADE x SOLICITAÇÃO (respeitando cobertura)
+    const sqlNec = `
+      SELECT 
+        COM.CODPROD,
+        PRO.DESCRPROD,
+        ITE.QTDNEG AS SOLICITACAO_COMPRAS,
+        ITE.VLRUNIT AS PRECO_ATUAL,
+        COM.ESTOQUE,
+        COM.GIRODIARIO,
+        (COM.LEADTIME + COM.COBERTURAIDEAL) AS COBERTURAIDEAL,
+        COM.COMPRAPEN,
+        COM.EMPENHO,
+        ROUND((COM.GIRODIARIO * (COM.LEADTIME + COM.COBERTURAIDEAL)) - (COM.ESTOQUE + COM.COMPRAPEN) + COM.EMPENHO, 0) AS NECESSIDADE_CALC,
+        COM.COBERTURA AS COBERTURA_ESTOQUE
+      FROM AD_TGFPROCOM COM
+      JOIN TGFITE ITE ON ITE.CODPROD = COM.CODPROD
+      JOIN TGFPRO PRO ON PRO.CODPROD = COM.CODPROD
+      WHERE ITE.NUNOTA = ${nunotaNum}
+      ORDER BY PRO.DESCRPROD
+    `;
+    const necRows = await executarSQLObjects(req, sqlNec);
+
+    const cods = (necRows || []).map(r => Number(r.CODPROD)).filter(Boolean);
+    const codsIn = cods.length ? cods.join(",") : "0";
+
+    // 2) ÚLTIMAS 5 COMPRAS POR PRODUTO
+    const sqlPrecos = `
+      SELECT CODPROD, DTNEG, VLRUNIT
+      FROM (
+        SELECT 
+          ITE.CODPROD,
+          CAB.DTNEG,
+          ITE.VLRUNIT,
+          ROW_NUMBER() OVER (PARTITION BY ITE.CODPROD ORDER BY CAB.DTNEG DESC) AS RN
+        FROM TGFCAB CAB
+        JOIN TGFITE ITE ON ITE.NUNOTA = CAB.NUNOTA
+        WHERE CAB.TIPMOV = 'C'
+          AND ITE.CODPROD IN (${codsIn})
+      )
+      WHERE RN <= 5
+      ORDER BY CODPROD, DTNEG DESC
+    `;
+    const precRows = await executarSQLObjects(req, sqlPrecos);
+
+    const historico = {};
+    (precRows || []).forEach(r => {
+      const k = Number(r.CODPROD);
+      if (!historico[k]) historico[k] = [];
+      historico[k].push({
+        dtneg: r.DTNEG,
+        vlrunit: Number(r.VLRUNIT) || 0
+      });
+    });
+
+    const itens = (necRows || []).map(r => {
+      const codprod = Number(r.CODPROD);
+      const solicit = Number(r.SOLICITACAO_COMPRAS) || 0;
+      const precoAtual = Number(r.PRECO_ATUAL) || 0;
+      const coberturaAtual = Number(r.COBERTURA_ESTOQUE) || 0;
+      const coberturaIdeal = Number(r.COBERTURAIDEAL) || 0;
+
+      let necessidade = Number(r.NECESSIDADE_CALC) || 0;
+      if (coberturaAtual >= coberturaIdeal) necessidade = 0;
+
+      const diff = solicit - Math.max(necessidade, 0);
+      const statusQtd = diff > 0 ? "excesso" : diff < 0 ? "faltando" : "alinhado";
+
+      const hist = historico[codprod] || [];
+      const last = hist[0]?.vlrunit ?? null;
+      const min = hist.length ? Math.min(...hist.map(h => h.vlrunit)) : null;
+      const max = hist.length ? Math.max(...hist.map(h => h.vlrunit)) : null;
+      const avg = hist.length
+        ? Math.round((hist.reduce((a, b) => a + b.vlrunit, 0) / hist.length) * 100) / 100
+        : null;
+
+      const variacaoUltima = last != null && last !== 0 ? ((precoAtual - last) / last) * 100 : null;
+      const variacaoMedia  = avg  != null && avg  !== 0 ? ((precoAtual - avg ) / avg ) * 100 : null;
+
+      return {
+        codprod,
+        descrprod: r.DESCRPROD,
+        solicitacao: solicit,
+        necessidade,
+        statusQtd,
+        diferenca: diff,
+        precoAtual,
+        precoUltima: last,
+        precoMin: min,
+        precoMax: max,
+        precoMedio: avg,
+        variacaoUltima: variacaoUltima != null ? Math.round(variacaoUltima * 100) / 100 : null,
+        variacaoMedia:  variacaoMedia  != null ? Math.round(variacaoMedia  * 100) / 100 : null,
+        historico: hist,
+        giroDiario: Number(r.GIRODIARIO) || 0,
+        estoque: Number(r.ESTOQUE) || 0,
+        coberturaAtual,
+        coberturaIdeal
+      };
+    });
+
+    const resumo = {
+      totalItens: itens.length,
+      emExcesso: itens.filter(i => i.statusQtd === "excesso").length,
+      emFalta: itens.filter(i => i.statusQtd === "faltando").length,
+      alinhados: itens.filter(i => i.statusQtd === "alinhado").length,
+      itensComPrecoAcimaMedia: itens.filter(i => (i.variacaoMedia ?? 0) > 5).length,
+      itensComPrecoAbaixoMedia: itens.filter(i => (i.variacaoMedia ?? 0) < -5).length,
+    };
+
+    return res.json({ nunota: nunotaNum, itens, resumo });
+  } catch (e) {
+    console.error("Erro /api/beth/analisar:", e?.response?.data || e.message);
+    return res.status(500).json({ erro: "Falha na análise da Beth.", detalhes: e?.message });
+  }
+});
+
+// =======================
+// Rotas Beth (compatíveis)
+// =======================
+app.post("/api/beth/explicar", /*auth,*/ async (req, res) => {
+  try {
+    // Compatibilidade: aceita {pergunta,contexto,notas} ou {analysis,question}
+    let { pergunta, contexto, notas, analysis, question } = req.body || {};
+    if (!pergunta && question) pergunta = String(question);
+    if (!contexto && analysis) contexto = JSON.stringify(analysis);
+    if (!notas && analysis?.itens) notas = analysis.itens;
+
+    if (!pergunta) {
+      return res.status(400).json({ ok: false, erro: "Informe 'pergunta'." });
+    }
+
+    const out = await bethChat({ pergunta, contexto, notas });
+    return res.json({ ok: true, resposta: out });
+  } catch (err) {
+    console.error("POST /api/beth/explicar:", err?.message);
+    return res.status(500).json({ ok: false, erro: String(err?.message || err) });
+  }
+});
+
+/** opcional: uma rota especializada para “devo liberar?” */
+app.post("/api/beth/devo-liberar", /*auth,*/ async (req, res) => {
+  try {
+    const { resumoPedido, politicas, parcelas } = req.body || {};
+    const contexto = [
+      "Quero avaliar se devo liberar este pedido.",
+      `Resumo do pedido: ${JSON.stringify(resumoPedido)}`,
+      `Políticas/vínculos: ${JSON.stringify(politicas)}`
+    ].join("\n");
+
+    const pergunta = "Com base nos dados e políticas, devo liberar? Traga riscos, justificativa e próximos passos.";
+    const out = await bethChat({ pergunta, contexto, notas: parcelas });
+    res.json({ ok: true, resposta: out });
+  } catch (err) {
+    console.error("POST /api/beth/devo-liberar:", err?.message);
+    res.status(500).json({ ok: false, erro: String(err?.message || err) });
+  }
+});
+
+// SSE: /api/beth/stream (mantida para compat)
+app.post('/api/beth/stream', async (req, res) => {
+  // headers SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const send = (chunk) => res.write(`data: ${chunk}\n\n`);
+  const end  = () => res.end();
+
+  try {
+    const { pergunta, contexto, notas } = req.body || {};
+    if (!pergunta) { send(JSON.stringify({ error: "Pergunta ausente" })); return end(); }
+
+    // usa o serviço com streaming (abaixo)
+    await bethStream({
+      pergunta, contexto, notas,
+      onToken: (t) => send(JSON.stringify({ token: t })),
+      onDone:  () => send(JSON.stringify({ done: true }))
+    });
+    end();
+  } catch (e) {
+    send(JSON.stringify({ error: String(e.message || e) }));
+    end();
+  }
 });
 
 /* ===================== START ===================== */
